@@ -3,7 +3,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
 #SBATCH --time=4:00:00
-#SBATCH --output=fastp_%j.log
+#SBATCH --output=/athena/angsd/scratch/yiw4021/project/logs/fastp_%j.log
 
 module purge
 source /home/fs01/yiw4021/miniforge3/etc/profile.d/conda.sh
