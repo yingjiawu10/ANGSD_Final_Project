@@ -1,0 +1,202 @@
+---
+title: "Downstream Analyses"
+author: "Yingjia Wu"
+date: "2026-04-02"
+output:
+  rmdformats::readthedown
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r SraRunTable, include=TRUE, echo=FALSE}
+sra <- read.csv("/Users/yingjiawu/Desktop/ANGSD_final_project/metadata/SraRunTable.csv")
+head(sra)
+colnames(sra)
+```
+
+
+```{r counts.txt, include=TRUE, echo=FALSE}
+library(DESeq2)
+library(ggplot2)
+library(pheatmap)
+
+
+counts <- read.table("/Users/yingjiawu/Desktop/ANGSD_final_project/featureCount/counts.txt", 
+                     header=TRUE, skip=1, row.names=1) # input counts.txt, exclude 
+
+counts <- counts[, 6:ncol(counts)] # exclude the first 5 columns, kept only count data 
+
+colnames(counts) <- gsub(".*SRR", "SRR", colnames(counts))  # keep only SRR ID part of the column names
+colnames(counts) <- gsub("_trimmed_Aligned.sorted.bam", "", colnames(counts))
+
+coldata <- sra[, c("Run", "treatment", "patient")] # extract Run, treatment, patient from SraRunTable 
+coldata$treatment <- factor(coldata$treatment) 
+coldata$patient <- factor(coldata$patient) # convert treatment and patient into factor 
+rownames(coldata) <- coldata$Run # use SRR ID as row name (coldata)
+
+coldata <- coldata[colnames(counts), ] #make sure coldata's row sequence is the same as the counts's column sequence as DESeq2 requires
+```
+
+
+```{r DESeq2, include=TRUE, echo=FALSE}
+dds <- DESeqDataSetFromMatrix(countData = counts, # count matrix (with gene counts)
+                              colData = coldata, # sample info
+                              design = ~ patient + treatment
+)
+
+dds <- dds[rowSums(counts(dds)) >= 10, ] # filter out low expressed genes, whose total counts <10 
+dds <- DESeq(dds) #run DESeq2
+
+normalized_counts <- counts(dds, normalized=TRUE)
+```
+
+```{r PCA, include=TRUE, echo=FALSE}
+vsd <- vst(dds, blind=TRUE) 
+
+pca_data <- plotPCA(vsd, intgroup=c("treatment", "patient"), returnData=TRUE)
+percentVar <- round(100 * attr(pca_data, "percentVar"))
+
+ggplot(pca_data, aes(x=PC1, y=PC2, color=treatment, shape=patient)) +
+  geom_point(size=4) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  scale_color_manual(values=c("Untreated"="grey50", "Valproic acid"="steelblue", "Givinostat"="tomato")) +
+  scale_shape_manual(values=c("212"=15, "434"=16, "1636"=17, "2175"=18, "3248"=8)) +
+  theme_bw()
+```
+
+
+```{r sample distance heatmap, include=TRUE, echo=FALSE}
+library(pheatmap)
+sampleDists <- dist(t(assay(vsd)))
+pheatmap(as.matrix(sampleDists),
+         annotation_col = as.data.frame(colData(vsd)[, c("treatment", "patient")]))
+```
+
+
+```{r volcano plot, include=TRUE, echo=FALSE}
+library(patchwork)
+library(ggrepel)
+
+res_giv_vs_un <- results(dds, contrast=c("treatment", "Givinostat", "Untreated"))
+res_val_vs_un <- results(dds, contrast=c("treatment", "Valproic acid", "Untreated"))
+res_giv_vs_val <- results(dds, contrast=c("treatment", "Givinostat", "Valproic acid"))
+
+plot_volcano <- function(res, title) {
+  df <- as.data.frame(res)
+  df$gene <- rownames(df)
+  df$status <- "Not significant"
+  df$status[df$log2FoldChange > 1 & df$padj < 0.05] <- "Upregulated" # log2FoldChange > 1, padj < 0.05 = upregulated
+  df$status[df$log2FoldChange < -1 & df$padj < 0.05] <- "Downregulated" # log2FoldChange < -1, padj < 0.05 = downregulated
+  
+  # top5 upregulated & top5 downregulated genes will display gene names
+  top_up <- df[df$status == "Upregulated", ]
+  top_up <- head(top_up[order(top_up$padj), ], 5)
+  
+  top_down <- df[df$status == "Downregulated", ]
+  top_down <- head(top_down[order(top_down$padj), ], 5)
+  
+  top_genes <- rbind(top_up, top_down)
+  
+  ggplot(df, aes(x=log2FoldChange, y=-log10(padj), color=status)) +
+    geom_point(alpha=0.5, size=1) +
+    scale_color_manual(values=c("Upregulated"="red", 
+                                "Downregulated"="blue", 
+                                "Not significant"="grey")) +
+    geom_vline(xintercept=c(-1, 1), linetype="dashed") +
+    geom_hline(yintercept=-log10(0.05), linetype="dashed") +
+    xlim(-7, 7) +
+    geom_text_repel(data=top_genes, aes(label=gene), size=3, max.overlaps=20) +
+    theme_bw() +
+    theme(plot.title = element_text(size=10)) +
+    labs(title=title, x="log2 Fold Change", y="-log10(adjusted p-value)")
+}
+
+p1 <- plot_volcano(res_giv_vs_un, "Givinostat vs Untreated")
+p2 <- plot_volcano(res_val_vs_un, "Valproic acid vs Untreated")
+p3 <- plot_volcano(res_giv_vs_val, "Givinostat vs Valproic acid")
+
+ggsave("/Users/yingjiawu/Desktop/volcano_plots.png", p1 + p2 + p3, width=15, height=5)
+```
+
+
+Givinostat vs. untreated
+```{r gene ontology Givinostat vs. Untreated, include=TRUE, echo=FALSE}
+# BiocManager::install("org.Hs.eg.db")
+library(clusterProfiler)
+library(org.Hs.eg.db)
+
+# upregulated genes for Valproic Acid vs. Untreated
+up_genes <- rownames(res_giv_vs_un[which(
+  res_giv_vs_un$padj < 0.05 & 
+  res_giv_vs_un$log2FoldChange > 1), ])
+
+# downregulated genes for Valproic Acid vs. Untreated
+down_genes <- rownames(res_giv_vs_un[which(
+  res_giv_vs_un$padj < 0.05 & 
+  res_giv_vs_un$log2FoldChange < -1), ])
+
+# gene ontology enrichment of upreglated_genes
+go_up <- enrichGO(gene = up_genes,
+                       OrgDb = org.Hs.eg.db,
+                       keyType = "SYMBOL",
+                       ont = "BP",  
+                       pAdjustMethod = "BH",
+                       pvalueCutoff = 0.05)
+
+# gene ontology enrichment of downregulated_genes
+go_down <- enrichGO(gene = down_genes,
+                       OrgDb = org.Hs.eg.db,
+                       keyType = "SYMBOL",
+                       ont = "BP",  
+                       pAdjustMethod = "BH",
+                       pvalueCutoff = 0.05)
+
+p_up <- dotplot(go_up, showCategory=20) + ggtitle("Upregulated GO terms")
+p_down <- dotplot(go_down, showCategory=20) + ggtitle("Downregulated GO terms")
+p_up
+p_down
+
+```
+
+
+Valproic Acid vs. untreated
+```{r gene ontology Valproic Acid vs. Untreated, include=TRUE, echo=FALSE}
+
+# upregulated genes in 
+up_genes <- rownames(res_giv_vs_un[which(
+  res_val_vs_un$padj < 0.05 & 
+  res_val_vs_un$log2FoldChange > 1), ])
+
+# downregulated genes
+down_genes <- rownames(res_giv_vs_un[which(
+  res_val_vs_un$padj < 0.05 & 
+  res_val_vs_un$log2FoldChange < -1), ])
+
+# gene ontology enrichment of upreglated_genes
+go_up <- enrichGO(gene = up_genes,
+                       OrgDb = org.Hs.eg.db,
+                       keyType = "SYMBOL",
+                       ont = "BP",  
+                       pAdjustMethod = "BH",
+                       pvalueCutoff = 0.05)
+
+# gene ontology enrichment of downregulated_genes
+go_down <- enrichGO(gene = down_genes,
+                       OrgDb = org.Hs.eg.db,
+                       keyType = "SYMBOL",
+                       ont = "BP",  
+                       pAdjustMethod = "BH",
+                       pvalueCutoff = 0.05)
+
+p_up <- dotplot(go_up, showCategory=20) + ggtitle("Upregulated GO terms (Valproic Acid vs. Untreated)")
+p_down <- dotplot(go_down, showCategory=20) + ggtitle("Downregulated GO terms (Valproic Acid vs. Untreated)")
+p_up
+p_down
+
+```
+
+
